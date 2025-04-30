@@ -1,0 +1,861 @@
+TABLES sscrfields.
+
+TYPES: BEGIN OF ty_xl_upd,
+         tech_doc_no  TYPE i,
+         tech_item_no TYPE i,
+         doc_date     TYPE char10,
+         doc_txt      TYPE bktxt,
+         matnr        TYPE matnr,
+         plant        TYPE werks_d,
+         stograge     TYPE lgort_d,
+         entry_qnt    TYPE erfmg,
+         entry_uom    TYPE erfme,
+         batch        TYPE charg_d,
+         costcenter   TYPE kostl,
+         move_type    TYPE bwart,
+         amount       TYPE exbwr,
+         reson_cd     TYPE mb_grbew,
+       END OF ty_xl_upd,
+
+       BEGIN OF ty_display_error,
+         tech_doc_no   TYPE i,
+         tech_item_no  TYPE i,
+         doc_date      TYPE char10,
+         doc_txt       TYPE bktxt,
+         matnr         TYPE matnr,
+         plant         TYPE werks_d,
+         stograge      TYPE lgort_d,
+         entry_qnt     TYPE erfmg,
+         entry_uom     TYPE erfme,
+         batch         TYPE charg_d,
+         costcenter    TYPE kostl,
+         move_type     TYPE bwart,
+         amount        TYPE exbwr,
+         reson_cd      TYPE mb_grbew,
+         error_message TYPE string,
+       END OF ty_display_error,
+
+       BEGIN OF ty_data,
+         tech_doc_no  TYPE i,
+         tech_item_no TYPE i,
+         doc_date     TYPE datum,
+         doc_txt      TYPE bktxt,
+         item_data    TYPE zmdt_goods_item,
+       END OF ty_data.
+
+
+
+TYPES: BEGIN OF ty_final,
+         tech_doc_no TYPE i,
+         doc_no      TYPE bapi2017_gm_head_ret-mat_doc,
+         doc_yr      TYPE bapi2017_gm_head_ret-doc_year,
+         error_flag  TYPE boolean,
+         message     TYPE string,
+       END OF ty_final.
+
+
+DATA: gt_upd_data TYPE TABLE OF ty_xl_upd,
+      gt_final    TYPE TABLE OF ty_final,
+      go_alv      TYPE REF TO cl_salv_table,
+      gt_data     TYPE TABLE OF ty_data,
+      gv_count    TYPE i,
+      gt_display  TYPE TABLE OF ty_display_error.
+
+*--------------------------------------------------------------------
+*Selection Screen
+*--------------------------------------------------------------------
+
+SELECTION-SCREEN: BEGIN OF BLOCK blk1 WITH FRAME TITLE TEXT-001.
+  PARAMETERS : p_file TYPE ibipparms-path.
+  SELECTION-SCREEN FUNCTION KEY 1.
+SELECTION-SCREEN : END OF BLOCK blk1.
+
+SELECTION-SCREEN : BEGIN OF BLOCK blk12 WITH FRAME TITLE TEXT-002.
+  PARAMETERS : pr_disp RADIOBUTTON GROUP grp1,
+               pr_post RADIOBUTTON GROUP grp1.
+SELECTION-SCREEN : END OF BLOCK blk12.
+
+
+
+CLASS lcl_main DEFINITION.
+  PUBLIC SECTION.
+    CLASS-DATA: gv_filename         TYPE string,
+                gt_raw              TYPE truxs_t_text_data,
+                gv_file             TYPE rlgrap-filename,
+                gt_records          TYPE solix_tab,
+                gv_flg              TYPE boolean,
+                lo_excel_ref        TYPE REF TO cl_fdt_xl_spreadsheet,
+                gs_goodsmvt_header  TYPE bapi2017_gm_head_01,
+                gt_goodsmvt_item    TYPE TABLE OF bapi2017_gm_item_create,
+                gv_goodsmvt_code    TYPE bapi2017_gm_code VALUE '03',
+                gt_return           TYPE TABLE OF bapiret2,
+                gs_goodsmvt_headret TYPE bapi2017_gm_head_ret,
+                gv_materialdocument TYPE  bapi2017_gm_head_ret-mat_doc,
+                gv_matdocumentyear  TYPE  bapi2017_gm_head_ret-doc_year.
+
+
+    CLASS-METHODS:
+      file_name CHANGING cv_file TYPE ibipparms-path ,
+      upload_data,
+      check_prepare_data,
+      download_template,
+      load_program,
+      display_alv CHANGING ct_table  TYPE table.
+
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    CLASS-METHODS:  check_data CHANGING cv_count TYPE i,
+      fill_header_data IMPORTING is_data TYPE ty_data          CHANGING cs_header_data   TYPE bapi2017_gm_head_01,
+      fill_item_data   IMPORTING it_item TYPE zmdt_goods_item  CHANGING ct_goodsmvt_item LIKE gt_goodsmvt_item,
+      post_data.
+
+ENDCLASS.
+CLASS lcl_main IMPLEMENTATION.
+  METHOD file_name.
+
+    CALL FUNCTION 'F4_FILENAME'
+      EXPORTING
+        program_name  = syst-cprog
+        dynpro_number = syst-dynnr
+      IMPORTING
+        file_name     = cv_file.
+
+
+  ENDMETHOD.
+  METHOD upload_data.
+    FIELD-SYMBOLS: <gt_data_h> TYPE STANDARD TABLE,
+                   <gt_data_l> TYPE STANDARD TABLE.
+
+    DATA: gt_tab1 TYPE TABLE OF ty_xl_upd.
+    DATA: gt_upd  TYPE TABLE OF ty_xl_upd,
+          ls_data TYPE ty_xl_upd.
+
+    DATA: lo_struct TYPE REF TO cl_abap_structdescr,
+          lo_table  TYPE REF TO cl_abap_tabledescr,
+          lr_type   TYPE REF TO cl_abap_typedescr.
+
+    DATA : lv_numberofcolumns   TYPE i,
+           lv_date_string       TYPE string,
+           lv_target_date_field TYPE datum,
+           lv_flag              TYPE boolean,
+           l_param1             TYPE syst-msgv1,
+           l_param2             TYPE syst-msgv1,
+           lv_convert_date(10)  TYPE c,
+           lv_skip              TYPE i,
+           lv_empty             TYPE boole_d,
+           lv_empty_tmp         TYPE boole_d,
+           lt_tab               TYPE REF TO data,
+           ls_tab               TYPE REF TO data.
+
+    DATA : lt_field TYPE cl_abap_structdescr=>component_table,
+           lt_comp  TYPE cl_abap_structdescr=>component_table.
+
+    FIELD-SYMBOLS: <struc_hdr>     TYPE any,
+                   <struc_itm>     TYPE any,
+                   <ls_data>       TYPE any,
+                   <lv_field>      TYPE any,
+                   <fs_excel_data> TYPE STANDARD TABLE,
+                   <fs_data>       TYPE any,
+                   <fs_comp>       TYPE any,
+                   <fs_table_t>    TYPE STANDARD TABLE,
+                   <fs_table>      TYPE any.
+
+
+
+
+
+    gv_filename = p_file.
+
+    CALL METHOD cl_gui_frontend_services=>gui_upload
+      EXPORTING
+        filename                = gv_filename
+        filetype                = 'BIN'
+      IMPORTING
+        filelength              = DATA(lv_filelength)
+        header                  = DATA(lv_headerxstring)
+      CHANGING
+        data_tab                = gt_records
+*       ISSCANPERFORMED         = SPACE
+      EXCEPTIONS
+        file_open_error         = 1
+        file_read_error         = 2
+        no_batch                = 3
+        gui_refuse_filetransfer = 4
+        invalid_type            = 5
+        no_authority            = 6
+        unknown_error           = 7
+        bad_data_format         = 8
+        header_not_allowed      = 9
+        separator_not_allowed   = 10
+        header_too_long         = 11
+        unknown_dp_error        = 12
+        access_denied           = 13
+        dp_out_of_memory        = 14
+        disk_full               = 15
+        dp_timeout              = 16
+        not_supported_by_gui    = 17
+        error_no_gui            = 18
+        OTHERS                  = 19.
+
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    ENDIF.
+
+    CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+      EXPORTING
+        input_length = lv_filelength
+      IMPORTING
+        buffer       = lv_headerxstring
+      TABLES
+        binary_tab   = gt_records
+      EXCEPTIONS
+        failed       = 1
+        OTHERS       = 2.
+
+    CREATE DATA lt_tab LIKE gt_upd_data.
+    ASSIGN lt_tab->* TO <fs_table_t>.
+
+    TRY .
+        lo_excel_ref = NEW cl_fdt_xl_spreadsheet(
+                                document_name = gv_filename
+                                xdocument     = lv_headerxstring ) .
+      CATCH cx_fdt_excel_core.
+    ENDTRY .
+
+    IF lo_excel_ref IS BOUND.
+*--Get List of Worksheets
+      lo_excel_ref->if_fdt_doc_spreadsheet~get_worksheet_names(
+        IMPORTING
+          worksheet_names = DATA(lt_worksheets) ).
+
+
+
+      IF NOT lt_worksheets IS INITIAL.
+*-- Header Tab
+        READ TABLE lt_worksheets INTO DATA(lv_woksheetname) INDEX 1.
+
+        DATA(lo_data_ref) = lo_excel_ref->if_fdt_doc_spreadsheet~get_itab_from_worksheet(
+                                                 lv_woksheetname ).
+*-- Excel work sheet data in dyanmic internal table
+        ASSIGN lo_data_ref->* TO <gt_data_h>.
+
+      ENDIF.
+    ENDIF.
+
+    lo_table ?= cl_abap_structdescr=>describe_by_data( gt_upd_data ).
+
+    lo_struct ?= lo_table->get_table_line_type( ).
+    lt_field = lo_struct->get_components( ).
+
+*
+    IF <gt_data_h> IS ASSIGNED.
+      DELETE <gt_data_h> INDEX 1.
+*-- Build the Header details
+      LOOP AT <gt_data_h> ASSIGNING  <ls_data>.
+*-- First, verify if field exists in dictionary
+        lv_empty = abap_true.
+        APPEND INITIAL LINE TO  <fs_table_t> ASSIGNING FIELD-SYMBOL(<ls_context>).
+
+*-- Initialize flag
+        lv_flag = abap_true.
+        l_param1 = sy-tabix.
+        CONDENSE l_param1 NO-GAPS.
+
+        WHILE lv_flag = abap_true.
+          lv_empty_tmp = abap_false.
+
+*-- Read columnwise entries
+          ASSIGN COMPONENT sy-index OF STRUCTURE <ls_data> TO <fs_comp> .
+          IF <fs_comp> IS NOT ASSIGNED.
+            lv_flag = abap_false.
+*-- Exit the loop when a row ends
+            EXIT.
+          ELSE.
+            IF <fs_comp> IS INITIAL.
+              lv_empty_tmp = abap_true.
+            ENDIF.
+
+            READ TABLE lt_field ASSIGNING FIELD-SYMBOL(<ls_field>) INDEX sy-index .
+            IF sy-subrc = 0.
+*-- Get the Datatype by finding the field name
+              ASSIGN COMPONENT <ls_field>-name OF STRUCTURE <ls_context> TO FIELD-SYMBOL(<ls_value>).
+              l_param2 = <ls_field>-name.
+              CONDENSE l_param2 NO-GAPS.
+              lr_type ?= <ls_field>-type.
+
+              <ls_value> = <fs_comp>.
+            ENDIF.
+          ENDIF.
+          UNASSIGN <fs_comp>.
+        ENDWHILE.
+      ENDLOOP .
+    ENDIF.
+*    DELETE <fs_table_t> INDEX 1.
+    CREATE DATA ls_tab LIKE LINE OF <fs_table_t>.
+    ASSIGN ls_tab->* TO <fs_table>.
+
+    LOOP AT <fs_table_t> INTO <fs_table>.
+      MOVE-CORRESPONDING <fs_table> TO ls_data.
+      APPEND ls_data TO gt_upd_data.
+    ENDLOOP.
+
+
+    IF gt_upd_data IS INITIAL.
+      MESSAGE 'No Data found' TYPE 'I'.
+    ENDIF.
+
+
+
+  ENDMETHOD.
+  METHOD check_data.
+    DATA: lv_quant TYPE char40,
+          lv_amt   TYPE char40,
+          lv_date  TYPE datum.
+
+    LOOP AT gt_upd_data ASSIGNING FIELD-SYMBOL(<fs_upd_data>).
+
+      CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+        EXPORTING
+          input        = <fs_upd_data>-matnr
+        IMPORTING
+          output       = <fs_upd_data>-matnr
+        EXCEPTIONS
+          length_error = 1
+          OTHERS       = 2.
+
+      IF sy-subrc <> 0.
+* Implement suitable error handling here
+      ENDIF.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = <fs_upd_data>-costcenter
+        IMPORTING
+          output = <fs_upd_data>-costcenter.
+
+      IF <fs_upd_data>-batch IS NOT INITIAL.
+
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = <fs_upd_data>-batch
+          IMPORTING
+            output = <fs_upd_data>-batch.
+
+      ENDIF.
+    ENDLOOP.
+
+    SELECT matnr FROM makt INTO TABLE @DATA(lt_makt)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE matnr = @gt_upd_data-matnr.
+
+    SELECT werks FROM t001w INTO TABLE @DATA(lt_werks)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE werks = @gt_upd_data-plant.
+
+    SELECT kostl FROM cskt INTO TABLE @DATA(lt_cskt)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE kostl = @gt_upd_data-costcenter.
+
+    SELECT werks, lgort FROM t001l INTO TABLE @DATA(lt_lgort)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE werks = @gt_upd_data-plant
+      AND lgort = @gt_upd_data-stograge.
+
+    SELECT bwart FROM t156 INTO TABLE @DATA(lt_t156)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE bwart = @gt_upd_data-move_type.
+
+    SELECT bwart, grund
+      FROM t157d INTO TABLE @DATA(lt_reasncd)
+      FOR ALL ENTRIES IN @gt_upd_data
+      WHERE bwart = @gt_upd_data-move_type
+      AND grund = @gt_upd_data-reson_cd.
+
+    LOOP AT gt_upd_data INTO DATA(ls_upd_data).
+      APPEND INITIAL LINE TO gt_display ASSIGNING FIELD-SYMBOL(<fs_dislpay>).
+      MOVE-CORRESPONDING ls_upd_data TO <fs_dislpay>.
+      IF ls_upd_data-tech_doc_no IS INITIAL.
+        DATA(lv_error) = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message = 'Please provide Technical document number' .
+        CONTINUE.
+
+      ENDIF.
+
+      SPLIT ls_upd_data-doc_date AT '.' INTO DATA(lv_dd) DATA(lv_mm) DATA(lv_yy).
+      lv_date = |{ lv_yy }{ lv_mm }{ lv_dd }|.
+
+      CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
+        EXPORTING
+          date                      = lv_date
+        EXCEPTIONS
+          plausibility_check_failed = 1
+          OTHERS                    = 2.
+
+      IF sy-subrc <> 0.
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+       <fs_dislpay>-error_message = 'Date format is incorrect'.
+        CLEAR lv_date.
+        CONTINUE.
+      ENDIF.
+
+      IF NOT line_exists( lt_makt[ matnr = ls_upd_data-matnr ] ).
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message =  'Material Number does not exists' .
+        CONTINUE.
+
+      ENDIF.
+
+      IF NOT line_exists( lt_werks[ werks = ls_upd_data-plant ] ) .
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+       <fs_dislpay>-error_message =  'Plant code does not exists'.
+
+        CONTINUE.
+
+      ENDIF.
+      IF NOT line_exists( lt_cskt[ kostl = ls_upd_data-costcenter ] ) .
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message = 'Costcenter does not exists'.
+
+        CONTINUE.
+      ENDIF.
+      IF NOT line_exists( lt_lgort[ werks = ls_upd_data-plant lgort = ls_upd_data-stograge ] ) .
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+       <fs_dislpay>-error_message = |Storage location{ ls_upd_data-stograge } doesnot exist for the plant code { ls_upd_data-plant }|.
+        CONTINUE.
+      ENDIF.
+
+
+      lv_quant = ls_upd_data-entry_qnt.
+
+      CONDENSE lv_quant.
+      IF lv_quant CA sy-abcde.
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message = 'Amounts should be numerical'.
+        CLEAR lv_quant.
+        CONTINUE.
+      ENDIF.
+
+      IF NOT line_exists( lt_t156[ bwart = ls_upd_data-move_type ] ).
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message = 'Movement type does not exists in the system'.
+
+        CONTINUE.
+
+      ENDIF.
+
+      IF ls_upd_data-reson_cd IS NOT INITIAL AND NOT line_exists( lt_reasncd[ bwart = ls_upd_data-move_type grund = ls_upd_data-reson_cd ] ).
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message =  'Reason code doesnot exists for the movement type' .
+        CONTINUE.
+      ENDIF.
+
+      lv_amt = ls_upd_data-amount.
+      CONDENSE lv_amt.
+      IF lv_amt CA sy-abcde.
+        lv_error = abap_true.
+        cv_count = cv_count + 1.
+        <fs_dislpay>-error_message = 'Amount is not nummeric' .
+        CLEAR lv_amt.
+        CONTINUE.
+
+      ENDIF.
+      IF lv_error = abap_false.
+        <fs_dislpay>-error_message = 'No error found'.
+      ENDIF.
+
+    ENDLOOP.
+
+
+  ENDMETHOD.
+  METHOD check_prepare_data.
+    DATA: lt_item  TYPE zmdt_goods_item,
+          ls_final TYPE ty_final.
+
+
+    IF gt_upd_data IS NOT INITIAL.
+      check_data( CHANGING cv_count = gv_count ).
+    ENDIF.
+    IF gv_count EQ 0.
+      LOOP AT gt_upd_data INTO DATA(ls_upd_data).
+        IF line_exists( gt_data[ tech_doc_no = ls_upd_data-tech_doc_no ] ).
+          ASSIGN gt_data[ tech_doc_no = ls_upd_data-tech_doc_no ] TO FIELD-SYMBOL(<fs_data>).
+
+          APPEND VALUE #( matnr        = ls_upd_data-matnr
+                          plant        = ls_upd_data-plant
+                          stograge     = ls_upd_data-stograge
+                          entry_qnt    = ls_upd_data-entry_qnt
+                          entry_uom    = ls_upd_data-entry_uom
+                          batch        = ls_upd_data-batch
+                          costcenter   = ls_upd_data-costcenter
+                          move_type    = ls_upd_data-move_type
+                          amount       = ls_upd_data-amount
+                          move_reas    = ls_upd_data-reson_cd  ) TO <fs_data>-item_data.
+
+
+        ELSE.
+          SPLIT ls_upd_data-doc_date AT '.' INTO DATA(lv_dd) DATA(lv_mm) DATA(lv_yy).
+          DATA(lv_docdt) = CONV datum( |{ lv_yy }{ lv_mm }{ lv_dd }| ).
+          APPEND VALUE #( matnr       = ls_upd_data-matnr
+                         plant        = ls_upd_data-plant
+                         stograge     = ls_upd_data-stograge
+                         entry_qnt    = ls_upd_data-entry_qnt
+                         entry_uom    = ls_upd_data-entry_uom
+                         batch        = ls_upd_data-batch
+                         costcenter   = ls_upd_data-costcenter
+                         move_type    = ls_upd_data-move_type
+                         amount       = ls_upd_data-amount
+                         move_reas    = ls_upd_data-reson_cd  ) TO lt_item.
+
+          APPEND VALUE #(   tech_doc_no  = ls_upd_data-tech_doc_no
+                            tech_item_no = ls_upd_data-tech_item_no
+                            doc_date     = lv_docdt
+                            doc_txt      = ls_upd_data-doc_txt
+                            item_data    = lt_item  ) TO gt_data.
+
+          FREE: lt_item.
+
+*          APPEND VALUE #( tech_doc_no = ls_upd_data-tech_doc_no
+*                          error_flag  = abap_false
+*                          message     = 'No error' ) TO gt_final.
+
+
+        ENDIF.
+
+
+      ENDLOOP.
+    ENDIF.
+
+  ENDMETHOD.
+  METHOD download_template.
+    DATA: lr_excel_str    TYPE REF TO data,
+          lo_src_header   TYPE REF TO cl_abap_tabledescr,
+          lo_tab_row_desc TYPE REF TO cl_abap_structdescr,
+          lv_content      TYPE xstring,
+          lt_binary_tab   TYPE TABLE OF sdokcntasc,
+          lv_length       TYPE i,
+          lv_path         TYPE string,
+          lv_fullpath     TYPE string,
+          lv_filename     TYPE string,
+          lv_result       TYPE i.
+
+
+
+    FREE: lr_excel_str, lo_src_header, lo_tab_row_desc.
+
+    GET REFERENCE OF gt_upd_data INTO lr_excel_str.
+
+    DATA(lo_itab_services) = cl_salv_itab_services=>create_for_table_ref( lr_excel_str ).
+
+    lo_src_header   ?= cl_abap_tabledescr=>describe_by_data_ref( lr_excel_str ).
+    lo_tab_row_desc ?= lo_src_header->get_table_line_type( ).
+
+    DATA(lo_tool_xls) = cl_salv_export_tool_ats_xls=>create_for_excel(
+                                                     EXPORTING r_data  =  lr_excel_str  ).
+
+
+    DATA(lo_config) = lo_tool_xls->configuration( ).
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Technical Document Number'
+        field_name           = 'TECH_DOC_NO'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Technical Item Number'
+        field_name           = 'TECH_ITEM_NO'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Document Date'
+        field_name           = 'DOC_DATE'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Document Header Text'
+        field_name           = 'DOC_TXT'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Material'
+        field_name           = 'MATNR'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Plant'
+        field_name           = 'PLANT'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+    lo_config->add_column(
+      EXPORTING
+        header_text          = 'Storage Location'
+        field_name           = 'STOGRAGE'
+        display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Entry Quantity'
+         field_name           = 'ENTRY_QNT'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Entry Unit of Measure'
+         field_name           = 'ENTRY_UOM'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Batch Number'
+         field_name           = 'BATCH'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Cost Center'
+         field_name           = 'COSTCENTER'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Movement Type'
+         field_name           = 'MOVE_TYPE'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+    lo_config->add_column(
+       EXPORTING
+         header_text          = 'Amount'
+         field_name           = 'AMOUNT'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+        lo_config->add_column(
+       EXPORTING
+         header_text          = 'Reason Code'
+         field_name           = 'RESON_CD'
+         display_type         =  if_salv_bs_model_column=>uie_text_view ).
+
+
+
+    TRY.
+        lo_tool_xls->read_result(
+          IMPORTING content    = lv_content   ).
+      CATCH cx_root.
+    ENDTRY.
+
+
+    lv_filename = 'Goods Movement'.
+
+    IF xstrlen( lv_content ) > 0.
+      cl_gui_frontend_services=>file_save_dialog( EXPORTING
+                                                      default_file_name = lv_filename
+                                                      default_extension = 'xlsx'
+                                                      file_filter       = |Excel-File (*.xlsx)\|*.xlsx\|{ cl_gui_frontend_services=>filetype_all }|
+                                                     CHANGING
+                                                       filename    = lv_filename
+                                                       path        = lv_path
+                                                       fullpath    = lv_fullpath
+                                                       user_action = lv_result ).
+
+    ENDIF.
+
+    IF lv_result EQ cl_gui_frontend_services=>action_ok.
+      DATA(lt_raw_data) = cl_bcs_convert=>xstring_to_solix( EXPORTING iv_xstring = lv_content ).
+      cl_gui_frontend_services=>gui_download( EXPORTING
+                                         filename      = lv_fullpath
+                                         filetype      = 'BIN'
+                                         bin_filesize  = xstrlen( lv_content )
+                                       CHANGING
+                                         data_tab      = lt_raw_data ).
+
+    ENDIF.
+
+
+
+
+  ENDMETHOD.
+  METHOD load_program.
+    check_prepare_data( ).
+    IF gv_count EQ 0 AND pr_post = abap_true.
+      post_data( ).
+    ENDIF.
+  ENDMETHOD.
+  METHOD fill_header_data.
+    cs_header_data = VALUE  #( doc_date   = is_data-doc_date
+                               pstng_date = is_data-doc_date
+                               header_txt = is_data-doc_txt ).
+
+  ENDMETHOD.
+  METHOD fill_item_data.
+*    DATA: lv_matnr TYPE matnr18.
+
+    ct_goodsmvt_item = VALUE #( FOR ls_item IN it_item
+                                ( material   = ls_item-matnr
+                                  plant       = ls_item-plant
+                                  stge_loc    = ls_item-stograge
+                                  batch       = ls_item-batch
+                                  move_reas   = ls_item-move_reas
+                                  move_type   = ls_item-move_type
+                                  entry_qnt   = ls_item-entry_qnt
+                                  entry_uom   = ls_item-entry_uom
+                                  amount_lc   = ls_item-amount
+                                  costcenter  = ls_item-costcenter ) ).
+
+
+  ENDMETHOD.
+  METHOD post_data.
+    FREE: gt_final.
+    LOOP AT gt_data INTO DATA(ls_data).
+
+      fill_header_data( EXPORTING is_data = ls_data             CHANGING cs_header_data = gs_goodsmvt_header ).
+      fill_item_data( EXPORTING it_item  = ls_data-item_data  CHANGING ct_goodsmvt_item = gt_goodsmvt_item ).
+
+      CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+        EXPORTING
+          goodsmvt_header  = gs_goodsmvt_header                " Material Document Header Data
+          goodsmvt_code    = gv_goodsmvt_code                  " Assign Code to Transaction for Goods Movement
+        IMPORTING
+          goodsmvt_headret = gs_goodsmvt_headret                 " Material Document Number/Material Document Year
+          materialdocument = gv_materialdocument                 " Number of Material Document
+          matdocumentyear  = gv_matdocumentyear                  " Material Document Year
+        TABLES
+          goodsmvt_item    = gt_goodsmvt_item                 " Material Document Items
+          return           = gt_return.                       " Return Messages
+
+      DELETE gt_return WHERE type = 'W'.
+
+      IF gv_materialdocument IS INITIAL .
+
+        APPEND VALUE ty_final( tech_doc_no = ls_data-tech_doc_no
+                               error_flag  = abap_true
+                               message     = VALUE #( gt_return[ 1 ]-message OPTIONAL )  ) TO gt_final.
+
+        ROLLBACK WORK.
+
+      ELSE.
+
+        CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'.
+
+        APPEND VALUE ty_final( tech_doc_no = ls_data-tech_doc_no
+                               doc_no      = gv_materialdocument
+                               doc_yr      = gv_matdocumentyear
+                               error_flag  = abap_false
+                               message     = 'Goods moved sucessfully'  ) TO gt_final.
+
+
+
+      ENDIF.
+
+      CLEAR: gs_goodsmvt_header.
+      FREE: gt_goodsmvt_item.
+
+
+    ENDLOOP.
+
+  ENDMETHOD.
+  METHOD display_alv.
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table   =  go_alv                       " Basis Class Simple ALV Tables
+          CHANGING
+            t_table        =  ct_table
+        ).
+        go_alv->set_screen_status( pfstatus = 'ZGOODS_MVMNT' report = sy-repid
+                                   set_functions = go_alv->c_functions_all ).
+
+        DATA(lo_column) = go_alv->get_columns( ).
+        lo_column->set_optimize( 'X' ).
+        IF pr_post IS NOT INITIAL.
+          TRY.
+              DATA(lo_cloumn_nm) = lo_column->get_column( columnname = 'TECH_DOC_NO' ).
+              lo_cloumn_nm->set_long_text( 'Technical Document Number' ).
+              lo_cloumn_nm->set_medium_text( 'Technical Doc No' ).
+              lo_cloumn_nm->set_short_text( 'TechDocNo' ).
+
+            CATCH cx_salv_not_found.
+
+          ENDTRY.
+          TRY.
+              lo_cloumn_nm = lo_column->get_column( columnname = 'ERROR_FLAG' ).
+              lo_cloumn_nm->set_long_text( 'Error Flag' ).
+              lo_cloumn_nm->set_medium_text( 'Error Flag' ).
+              lo_cloumn_nm->set_short_text( 'Error Flag' ).
+
+            CATCH cx_salv_not_found.
+          ENDTRY.
+
+          TRY.
+              lo_cloumn_nm = lo_column->get_column( columnname = 'MESSAGE' ).
+              lo_cloumn_nm->set_long_text( 'Message' ).
+              lo_cloumn_nm->set_medium_text( 'Message' ).
+              lo_cloumn_nm->set_short_text( 'Message' ).
+
+            CATCH cx_salv_not_found.
+          ENDTRY.
+
+        ELSE.
+           TRY.
+              lo_cloumn_nm = lo_column->get_column( columnname = 'ERROR_MESSAGE' ).
+              lo_cloumn_nm->set_long_text( 'Error Message' ).
+              lo_cloumn_nm->set_medium_text( 'Error Msg' ).
+              lo_cloumn_nm->set_short_text( 'Error Msg' ).
+
+            CATCH cx_salv_not_found.
+
+          ENDTRY.
+        ENDIF.
+        go_alv->display( ).
+      CATCH cx_salv_msg  INTO DATA(lo_err).
+        DATA(lv_err) = lo_err->get_text( ).
+    ENDTRY.
+
+
+  ENDMETHOD.
+ENDCLASS.
+
+INITIALIZATION.
+  MOVE 'Download Template' TO sscrfields-functxt_01.
+
+AT SELECTION-SCREEN.
+  IF sy-ucomm = 'FC01'.
+    lcl_main=>download_template( ).
+  ENDIF.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  lcl_main=>file_name( CHANGING cv_file = p_file ).
+
+START-OF-SELECTION.
+ FREE: gt_final, gt_display.
+  lcl_main=>upload_data( ).
+  lcl_main=>load_program( ).
+
+END-OF-SELECTION.
+
+  IF pr_post IS NOT INITIAL AND gv_count IS INITIAL.
+    lcl_main=>display_alv( CHANGING ct_table = gt_final ).
+  ELSE.
+    lcl_main=>display_alv(  CHANGING ct_table = gt_display  ).
+  ENDIF.
